@@ -20,6 +20,8 @@ from pathlib import Path
 
 from axon.config.ignore import load_gitignore, should_ignore
 from axon.config.languages import is_supported
+from axon.core.graph.graph import KnowledgeGraph
+from axon.core.graph.model import NodeLabel, RelType
 from axon.core.ingestion.walker import FileEntry, read_file
 from axon.core.storage.base import StorageBackend
 
@@ -27,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 # Debounce: global phases fire after this many seconds of no file changes.
 QUIET_PERIOD = 5.0
+
+# Maximum time dirty files can accumulate before forcing a global phase,
+# even if changes keep arriving (prevents starvation under continuous writes).
+MAX_DIRTY_AGE = 60.0
 
 # How often watchfiles yields (controls quiet-period check granularity).
 _POLL_INTERVAL_MS = 500
@@ -96,27 +102,19 @@ def _reindex_files(
     return len(entries), reindexed_paths
 
 
-def _compute_dirty_node_ids(storage: StorageBackend, dirty_files: set[str]) -> set[str]:
+def _compute_dirty_node_ids(graph: KnowledgeGraph, dirty_files: set[str]) -> set[str]:
     """Find all node IDs in dirty files + their immediate CALLS neighbors."""
     if not dirty_files:
         return set()
 
-    dirty_node_ids: set[str] = set()
-    for file_path in dirty_files:
-        escaped = file_path.replace("\\", "\\\\").replace("'", "\\'")
-        results = storage.execute_raw(
-            f"MATCH (n) WHERE n.file_path = '{escaped}' RETURN n.id"
-        )
-        for row in results:
-            if row[0]:
-                dirty_node_ids.add(row[0])
+    dirty_node_ids = {n.id for n in graph.iter_nodes() if n.file_path in dirty_files}
 
     neighbor_ids: set[str] = set()
     for node_id in dirty_node_ids:
-        for caller in storage.get_callers(node_id):
-            neighbor_ids.add(caller.id)
-        for callee in storage.get_callees(node_id):
-            neighbor_ids.add(callee.id)
+        for rel in graph.get_outgoing(node_id, RelType.CALLS):
+            neighbor_ids.add(rel.target)
+        for rel in graph.get_incoming(node_id, RelType.CALLS):
+            neighbor_ids.add(rel.source)
 
     return dirty_node_ids | neighbor_ids
 
@@ -133,25 +131,20 @@ def _run_incremental_global_phases(
     from axon.core.ingestion.dead_code import process_dead_code
     from axon.core.ingestion.processes import process_processes
     from axon.core.embeddings.embedder import embed_nodes
-    from axon.core.graph.model import NodeLabel, RelType
+
+    storage.delete_synthetic_nodes()
 
     logger.info("Hydrating graph from storage...")
     graph = storage.load_graph()
-
-    # --- Communities ---
-    storage.delete_synthetic_nodes()
     num_communities = process_communities(graph)
     logger.info("Communities: %d", num_communities)
 
-    # --- Processes (depends on communities for kind classification) ---
     num_processes = process_processes(graph)
     logger.info("Processes: %d", num_processes)
 
-    # --- Dead code ---
     num_dead = process_dead_code(graph)
     logger.info("Dead code: %d", num_dead)
 
-    # Persist new synthetic nodes and relationships.
     new_nodes = (
         list(graph.get_nodes_by_label(NodeLabel.COMMUNITY))
         + list(graph.get_nodes_by_label(NodeLabel.PROCESS))
@@ -165,18 +158,10 @@ def _run_incremental_global_phases(
     if new_rels:
         storage.add_relationships(new_rels)
 
-    dead_ids: set[str] = set()
-    alive_ids: set[str] = set()
-    _SYMBOL_LABELS = (NodeLabel.FUNCTION, NodeLabel.METHOD, NodeLabel.CLASS)
-    for label in _SYMBOL_LABELS:
-        for node in graph.get_nodes_by_label(label):
-            if node.is_dead:
-                dead_ids.add(node.id)
-            else:
-                alive_ids.add(node.id)
+    dead_ids = {n.id for n in graph.iter_nodes() if n.is_dead}
+    alive_ids = {n.id for n in graph.iter_nodes() if not n.is_dead}
     storage.update_dead_flags(dead_ids, alive_ids)
 
-    # --- Coupling (only if new commits) ---
     if run_coupling:
         storage.remove_relationships_by_type(RelType.COUPLED_WITH)
         num_coupled = process_coupling(graph, repo_path)
@@ -185,8 +170,7 @@ def _run_incremental_global_phases(
             storage.add_relationships(coupled_rels)
         logger.info("Coupling: %d pairs", num_coupled)
 
-    # --- Incremental embeddings ---
-    dirty_node_ids = _compute_dirty_node_ids(storage, dirty_files)
+    dirty_node_ids = _compute_dirty_node_ids(graph, dirty_files)
     if dirty_node_ids:
         logger.info("Re-embedding %d nodes...", len(dirty_node_ids))
         try:
@@ -226,7 +210,8 @@ async def watch_repo(
     gitignore = load_gitignore(repo_path)
     dirty_files: set[str] = set()
     last_change_time: float = 0.0
-    global_running = False
+    first_dirty_time: float = 0.0
+    global_lock = asyncio.Lock()
     last_known_commit = _get_head_sha(repo_path)
 
     logger.info("Watching %s for changes...", repo_path)
@@ -251,30 +236,38 @@ async def watch_repo(
             if reindexed:
                 dirty_files |= reindexed
                 last_change_time = time.monotonic()
+                if first_dirty_time == 0.0:
+                    first_dirty_time = last_change_time
                 logger.info("Reindexed %d file(s), %d paths dirty", count, len(reindexed))
 
         # --- Tier 2: Debounced global phases ---
         now = time.monotonic()
+        quiet_elapsed = last_change_time > 0 and (now - last_change_time) >= QUIET_PERIOD
+        starvation = first_dirty_time > 0 and (now - first_dirty_time) >= MAX_DIRTY_AGE
         if (
             dirty_files
-            and not global_running
-            and last_change_time > 0
-            and (now - last_change_time) >= QUIET_PERIOD
+            and not global_lock.locked()
+            and (quiet_elapsed or starvation)
         ):
-            global_running = True
             snapshot = dirty_files.copy()
             dirty_files.clear()
+            first_dirty_time = 0.0
 
-            current_commit = _get_head_sha(repo_path)
+            current_commit = await asyncio.to_thread(_get_head_sha, repo_path)
             run_coupling = current_commit != last_known_commit
             if run_coupling:
                 last_known_commit = current_commit
 
-            logger.info("Running incremental global phases...")
-            await _run_sync(
-                _run_incremental_global_phases,
-                storage, repo_path, snapshot, run_coupling,
-            )
-            global_running = False
+            try:
+                async with global_lock:
+                    logger.info("Running incremental global phases...")
+                    await _run_sync(
+                        _run_incremental_global_phases,
+                        storage, repo_path, snapshot, run_coupling,
+                    )
+            except Exception:
+                logger.exception("Global phases failed; re-queueing dirty files")
+                dirty_files |= snapshot
+                last_change_time = time.monotonic()
 
     logger.info("Watch stopped.")

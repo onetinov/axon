@@ -93,20 +93,7 @@ def embed_nodes(
     model_name: str = "BAAI/bge-small-en-v1.5",
     batch_size: int = 64,
 ) -> list[NodeEmbedding]:
-    """Generate embeddings for a specific set of node IDs.
-
-    Only embeds nodes whose label is in EMBEDDABLE_LABELS and whose ID
-    is in *node_ids*.  Uses the same text generation as embed_graph.
-
-    Args:
-        graph: The knowledge graph containing the nodes.
-        node_ids: Set of node IDs to embed.
-        model_name: The fastembed model identifier.
-        batch_size: Number of texts to encode per batch.
-
-    Returns:
-        A list of :class:`NodeEmbedding` instances for the requested nodes.
-    """
+    """Like :func:`embed_graph`, but only for the given *node_ids*."""
     if not node_ids:
         return []
 

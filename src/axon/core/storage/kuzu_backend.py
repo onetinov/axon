@@ -589,15 +589,7 @@ class KuzuBackend:
         return mapping
 
     def load_graph(self) -> KnowledgeGraph:
-        """Reconstruct a full :class:`KnowledgeGraph` from the database.
-
-        Queries every node table and the ``CodeRelation`` relationship group,
-        converting rows back into :class:`GraphNode` and
-        :class:`GraphRelationship` objects.
-
-        Returns:
-            A fully populated :class:`KnowledgeGraph` instance.
-        """
+        """Reconstruct a full :class:`KnowledgeGraph` from the database."""
         assert self._conn is not None
         graph = KnowledgeGraph()
 
@@ -656,7 +648,8 @@ class KuzuBackend:
                     )
                 )
         except Exception:
-            logger.debug("load_graph: failed to read relationships", exc_info=True)
+            logger.error("load_graph: relationship query failed — graph incomplete", exc_info=True)
+            raise
 
         return graph
 
@@ -690,30 +683,26 @@ class KuzuBackend:
     ) -> None:
         """Set is_dead=True on *dead_ids* and is_dead=False on *alive_ids*."""
         assert self._conn is not None
-        for node_id in dead_ids:
-            table = _table_for_id(node_id)
-            if table:
+
+        def _batch_set(ids: set[str], value: bool) -> None:
+            by_table: dict[str, list[str]] = {}
+            for node_id in ids:
+                table = _table_for_id(node_id)
+                if table:
+                    by_table.setdefault(table, []).append(node_id)
+            for table, id_list in by_table.items():
                 try:
                     self._conn.execute(
-                        f"MATCH (n:{table}) WHERE n.id = $nid SET n.is_dead = true",
-                        parameters={"nid": node_id},
+                        f"MATCH (n:{table}) WHERE n.id IN $ids SET n.is_dead = $val",
+                        parameters={"ids": id_list, "val": value},
                     )
                 except Exception:
                     logger.debug(
-                        "update_dead_flags failed for %s", node_id, exc_info=True
+                        "update_dead_flags failed for table %s", table, exc_info=True
                     )
-        for node_id in alive_ids:
-            table = _table_for_id(node_id)
-            if table:
-                try:
-                    self._conn.execute(
-                        f"MATCH (n:{table}) WHERE n.id = $nid SET n.is_dead = false",
-                        parameters={"nid": node_id},
-                    )
-                except Exception:
-                    logger.debug(
-                        "update_dead_flags failed for %s", node_id, exc_info=True
-                    )
+
+        _batch_set(dead_ids, True)
+        _batch_set(alive_ids, False)
 
     def remove_relationships_by_type(self, rel_type: RelType) -> None:
         """Delete all relationships of a specific type."""
@@ -1047,7 +1036,10 @@ class KuzuBackend:
         try:
             nid = node_id or row[0]
             prefix = nid.split(":", 1)[0]
-            label = _LABEL_MAP.get(prefix, NodeLabel.FILE)
+            label = _LABEL_MAP.get(prefix)
+            if label is None:
+                logger.warning("Unknown node label prefix %r in id %s", prefix, nid)
+                return None
 
             return GraphNode(
                 id=row[0],

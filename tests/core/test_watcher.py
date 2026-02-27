@@ -12,8 +12,10 @@ from axon.core.ingestion.watcher import (
     _reindex_files,
     _get_head_sha,
     _compute_dirty_node_ids,
+    _run_incremental_global_phases,
     QUIET_PERIOD,
 )
+from axon.core.graph.model import NodeLabel
 from axon.core.ingestion.walker import FileEntry, read_file
 from axon.core.storage.kuzu_backend import KuzuBackend
 
@@ -343,9 +345,44 @@ class TestComputeDirtyNodeIds:
     ) -> None:
         run_pipeline(tmp_repo, storage, full=True, embeddings=False)
 
-        dirty_ids = _compute_dirty_node_ids(storage, {"src/app.py"})
+        graph = storage.load_graph()
+        dirty_ids = _compute_dirty_node_ids(graph, {"src/app.py"})
         assert any("app.py" in nid for nid in dirty_ids)
 
     def test_returns_empty_for_empty_input(self, storage: KuzuBackend) -> None:
-        result = _compute_dirty_node_ids(storage, set())
+        from axon.core.graph.graph import KnowledgeGraph
+        graph = KnowledgeGraph()
+        result = _compute_dirty_node_ids(graph, set())
         assert result == set()
+
+
+# ---------------------------------------------------------------------------
+# Tests: _run_incremental_global_phases
+# ---------------------------------------------------------------------------
+
+
+class TestRunIncrementalGlobalPhases:
+    """Integration test: stale synthetic nodes are not re-persisted."""
+
+    def test_no_stale_synthetic_nodes_after_rerun(
+        self, tmp_repo: Path, storage: KuzuBackend
+    ) -> None:
+        """Run global phases twice; verify old communities don't survive."""
+        run_pipeline(tmp_repo, storage, full=True, embeddings=False)
+
+        # First incremental run — should create communities.
+        _run_incremental_global_phases(
+            storage, tmp_repo, dirty_files={"src/app.py"}, run_coupling=False,
+        )
+        graph1 = storage.load_graph()
+        comm_count_1 = len(list(graph1.get_nodes_by_label(NodeLabel.COMMUNITY)))
+
+        # Second incremental run — old communities should be deleted before new ones.
+        _run_incremental_global_phases(
+            storage, tmp_repo, dirty_files={"src/app.py"}, run_coupling=False,
+        )
+        graph2 = storage.load_graph()
+        comm_count_2 = len(list(graph2.get_nodes_by_label(NodeLabel.COMMUNITY)))
+
+        # Community count should be stable, not doubled.
+        assert comm_count_2 == comm_count_1

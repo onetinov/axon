@@ -80,6 +80,26 @@ def _register_in_global_registry(meta: dict, repo_path: Path) -> None:
     )
 
 
+def _build_meta(result: "PipelineResult", repo_path: Path) -> dict:  # noqa: F821
+    """Build the meta.json dict from a pipeline result."""
+    return {
+        "version": __version__,
+        "name": repo_path.name,
+        "path": str(repo_path),
+        "stats": {
+            "files": result.files,
+            "symbols": result.symbols,
+            "relationships": result.relationships,
+            "clusters": result.clusters,
+            "flows": result.processes,
+            "dead_code": result.dead_code,
+            "coupled_pairs": result.coupled_pairs,
+            "embeddings": result.embeddings,
+        },
+        "last_indexed_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
 app = typer.Typer(
     name="axon",
     help="Axon — Graph-powered code intelligence engine.",
@@ -149,22 +169,7 @@ def analyze(
             embeddings=not no_embeddings,
         )
 
-    meta = {
-        "version": __version__,
-        "name": repo_path.name,
-        "path": str(repo_path),
-        "stats": {
-            "files": result.files,
-            "symbols": result.symbols,
-            "relationships": result.relationships,
-            "clusters": result.clusters,
-            "flows": result.processes,
-            "dead_code": result.dead_code,
-            "coupled_pairs": result.coupled_pairs,
-            "embeddings": result.embeddings,
-        },
-        "last_indexed_at": datetime.now(tz=timezone.utc).isoformat(),
-    }
+    meta = _build_meta(result, repo_path)
     meta_path = axon_dir / "meta.json"
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
@@ -425,24 +430,15 @@ def serve(
 
         _, result = run_pipeline(repo_path, storage, full=True, progress_callback=_stderr_progress)
 
-        meta = {
-            "version": __version__,
-            "name": repo_path.name,
-            "path": str(repo_path),
-            "stats": {
-                "files": result.files,
-                "symbols": result.symbols,
-                "relationships": result.relationships,
-                "clusters": result.clusters,
-                "flows": result.processes,
-                "dead_code": result.dead_code,
-                "coupled_pairs": result.coupled_pairs,
-                "embeddings": result.embeddings,
-            },
-            "last_indexed_at": datetime.now(tz=timezone.utc).isoformat(),
-        }
+        meta = _build_meta(result, repo_path)
         meta_path = axon_dir / "meta.json"
         meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+        try:
+            _register_in_global_registry(meta, repo_path)
+        except Exception:
+            logger.debug("Failed to register repo in global registry", exc_info=True)
+
         print("  Index complete.", file=sys.stderr, flush=True)
 
     lock = asyncio.Lock()
