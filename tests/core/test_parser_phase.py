@@ -442,3 +442,219 @@ class TestProcessParsingTypeScript:
         method_nodes = graph.get_nodes_by_label(NodeLabel.METHOD)
         method_names = {n.name for n in method_nodes}
         assert "start" in method_names
+
+
+# ---------------------------------------------------------------------------
+# Markdown / doc node tests
+# ---------------------------------------------------------------------------
+
+# Two synthetic markdown files that cross-reference each other.
+# docs/guide.md links to docs/reference.md and to the top-level README.md.
+GUIDE_MD = """\
+# Guide
+
+This is the main guide. See [Reference](reference.md) for the API.
+
+## Installation
+
+Install with pip. Also read the [README](../README.md).
+
+## Usage
+
+Call the library like so.
+"""
+
+REFERENCE_MD = """\
+# Reference
+
+Full API reference. See the [Guide](guide.md) for examples.
+
+## Functions
+
+Details here.
+"""
+
+README_MD = """\
+# Project
+
+Top-level readme.
+"""
+
+
+def _doc_graph() -> KnowledgeGraph:
+    """Return a graph pre-populated with DOCUMENT nodes for all three test files."""
+    g = KnowledgeGraph()
+    for path, name in [
+        ("docs/guide.md", "guide.md"),
+        ("docs/reference.md", "reference.md"),
+        ("README.md", "README.md"),
+    ]:
+        g.add_node(
+            GraphNode(
+                id=generate_id(NodeLabel.DOCUMENT, path),
+                label=NodeLabel.DOCUMENT,
+                name=name,
+                file_path=path,
+                language="markdown",
+            )
+        )
+    return g
+
+
+class TestProcessParsingDocSectionNodes:
+    """process_parsing creates SECTION nodes for markdown files."""
+
+    def test_creates_section_nodes(self) -> None:
+        g = _doc_graph()
+        files = [_make_file_entry("docs/guide.md", GUIDE_MD, "markdown")]
+        process_parsing(files, g)
+
+        sections = list(g.get_nodes_by_label(NodeLabel.SECTION))
+        names = {s.name for s in sections}
+        assert "Guide" in names
+        assert "Installation" in names
+        assert "Usage" in names
+
+    def test_section_node_has_line_numbers(self) -> None:
+        g = _doc_graph()
+        files = [_make_file_entry("docs/guide.md", GUIDE_MD, "markdown")]
+        process_parsing(files, g)
+
+        sections = {s.name: s for s in g.get_nodes_by_label(NodeLabel.SECTION)}
+        guide = sections["Guide"]
+        assert guide.start_line == 1
+        assert guide.end_line >= guide.start_line
+
+    def test_section_signature_is_heading_level(self) -> None:
+        g = _doc_graph()
+        files = [_make_file_entry("docs/guide.md", GUIDE_MD, "markdown")]
+        process_parsing(files, g)
+
+        sections = {s.name: s for s in g.get_nodes_by_label(NodeLabel.SECTION)}
+        assert sections["Guide"].signature == "1"
+        assert sections["Installation"].signature == "2"
+        assert sections["Usage"].signature == "2"
+
+
+class TestProcessParsingDocContainsHierarchy:
+    """process_parsing builds the DOCUMENT → SECTION CONTAINS hierarchy."""
+
+    def test_document_contains_h1_section(self) -> None:
+        g = _doc_graph()
+        files = [_make_file_entry("docs/guide.md", GUIDE_MD, "markdown")]
+        process_parsing(files, g)
+
+        contains = list(g.get_relationships_by_type(RelType.CONTAINS))
+        doc_id = generate_id(NodeLabel.DOCUMENT, "docs/guide.md")
+        # At least one CONTAINS edge must originate from the document node.
+        doc_sources = [r for r in contains if r.source == doc_id]
+        assert len(doc_sources) >= 1
+
+    def test_h1_contains_h2_sections(self) -> None:
+        g = _doc_graph()
+        files = [_make_file_entry("docs/guide.md", GUIDE_MD, "markdown")]
+        process_parsing(files, g)
+
+        contains = list(g.get_relationships_by_type(RelType.CONTAINS))
+        sections = {s.name: s for s in g.get_nodes_by_label(NodeLabel.SECTION)}
+
+        h1_id = sections["Guide"].id
+        h2_targets = {r.target for r in contains if r.source == h1_id}
+
+        installation_id = sections["Installation"].id
+        assert installation_id in h2_targets
+
+    def test_no_contains_between_sibling_sections(self) -> None:
+        g = _doc_graph()
+        files = [_make_file_entry("docs/guide.md", GUIDE_MD, "markdown")]
+        process_parsing(files, g)
+
+        contains = list(g.get_relationships_by_type(RelType.CONTAINS))
+        sections = {s.name: s for s in g.get_nodes_by_label(NodeLabel.SECTION)}
+
+        # "Usage" should NOT be a child of "Installation" (they're siblings).
+        install_id = sections["Installation"].id
+        usage_id = sections["Usage"].id
+        install_children = {r.target for r in contains if r.source == install_id}
+        assert usage_id not in install_children
+
+
+class TestProcessParsingDocReferences:
+    """process_parsing creates REFERENCES edges from markdown cross-file links."""
+
+    def test_creates_references_edge_to_indexed_doc(self) -> None:
+        g = _doc_graph()
+        files = [_make_file_entry("docs/guide.md", GUIDE_MD, "markdown")]
+        process_parsing(files, g)
+
+        refs = list(g.get_relationships_by_type(RelType.REFERENCES))
+        assert len(refs) >= 1
+
+        # All REFERENCES targets should be DOCUMENT nodes.
+        target_ids = {r.target for r in refs}
+        for tid in target_ids:
+            node = g.get_node(tid)
+            assert node is not None
+            assert node.label == NodeLabel.DOCUMENT
+
+    def test_references_edge_targets_correct_document(self) -> None:
+        g = _doc_graph()
+        files = [_make_file_entry("docs/guide.md", GUIDE_MD, "markdown")]
+        process_parsing(files, g)
+
+        refs = list(g.get_relationships_by_type(RelType.REFERENCES))
+        target_ids = {r.target for r in refs}
+
+        ref_doc_id = generate_id(NodeLabel.DOCUMENT, "docs/reference.md")
+        readme_doc_id = generate_id(NodeLabel.DOCUMENT, "README.md")
+
+        assert ref_doc_id in target_ids
+        assert readme_doc_id in target_ids
+
+    def test_references_edge_anchored_to_enclosing_section(self) -> None:
+        g = _doc_graph()
+        files = [_make_file_entry("docs/guide.md", GUIDE_MD, "markdown")]
+        process_parsing(files, g)
+
+        refs = list(g.get_relationships_by_type(RelType.REFERENCES))
+        ref_doc_id = generate_id(NodeLabel.DOCUMENT, "docs/reference.md")
+
+        # The link to reference.md is in the "Guide" section body (line 3).
+        guide_section = next(
+            s for s in g.get_nodes_by_label(NodeLabel.SECTION) if s.name == "Guide"
+        )
+        edge_to_ref = next(r for r in refs if r.target == ref_doc_id)
+        assert edge_to_ref.source == guide_section.id
+
+    def test_no_references_edge_for_unindexed_target(self) -> None:
+        """Links to files not in the graph are silently skipped."""
+        g = _doc_graph()
+        # reference.md links to guide.md — but guide.md is NOT in this graph.
+        g._nodes = {
+            k: v for k, v in g._nodes.items()
+            if "reference" in k or "README" in k
+        }
+        files = [_make_file_entry("docs/reference.md", REFERENCE_MD, "markdown")]
+        process_parsing(files, g)
+
+        refs = list(g.get_relationships_by_type(RelType.REFERENCES))
+        # guide.md is not indexed, so no edge should point to it.
+        guide_doc_id = generate_id(NodeLabel.DOCUMENT, "docs/guide.md")
+        assert all(r.target != guide_doc_id for r in refs)
+
+    def test_both_files_produce_mutual_references(self) -> None:
+        """When both docs are indexed, both directions of the link appear."""
+        g = _doc_graph()
+        files = [
+            _make_file_entry("docs/guide.md", GUIDE_MD, "markdown"),
+            _make_file_entry("docs/reference.md", REFERENCE_MD, "markdown"),
+        ]
+        process_parsing(files, g)
+
+        refs = list(g.get_relationships_by_type(RelType.REFERENCES))
+        guide_doc_id = generate_id(NodeLabel.DOCUMENT, "docs/guide.md")
+        ref_doc_id = generate_id(NodeLabel.DOCUMENT, "docs/reference.md")
+
+        targets = {r.target for r in refs}
+        assert guide_doc_id in targets   # reference.md → guide.md
+        assert ref_doc_id in targets     # guide.md → reference.md

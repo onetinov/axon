@@ -25,7 +25,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from axon.config.ignore import load_gitignore
+from axon.config.doc_config import DocConfig
+from axon.config.ignore import load_axonignore, load_gitignore
 from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import GraphRelationship, NodeLabel
 from axon.core.embeddings.embedder import embed_graph
@@ -63,6 +64,8 @@ _SYMBOL_LABELS: frozenset[NodeLabel] = frozenset(NodeLabel) - {
     NodeLabel.FOLDER,
     NodeLabel.COMMUNITY,
     NodeLabel.PROCESS,
+    NodeLabel.DOCUMENT,
+    NodeLabel.SECTION,
 }
 
 def run_pipeline(
@@ -71,6 +74,7 @@ def run_pipeline(
     full: bool = False,
     progress_callback: Callable[[str, float], None] | None = None,
     embeddings: bool = True,
+    doc_config: DocConfig | None = None,
 ) -> tuple[KnowledgeGraph, PipelineResult]:
     """Run phases 1-11 of the ingestion pipeline.
 
@@ -94,6 +98,10 @@ def run_pipeline(
     embeddings:
         When ``True`` (default), generate and store vector embeddings after
         bulk-loading.  Set to ``False`` to skip embedding generation.
+    doc_config:
+        Optional :class:`DocConfig` enabling markdown doc indexing.  When
+        ``None`` or ``doc_config.enabled is False``, no ``.md`` files are
+        processed (zero impact on existing code paths).
 
     Returns
     -------
@@ -108,8 +116,8 @@ def run_pipeline(
             progress_callback(phase, pct)
 
     report("Walking files", 0.0)
-    gitignore = load_gitignore(repo_path)
-    files = walk_repo(repo_path, gitignore)
+    ignore_patterns = load_gitignore(repo_path) + load_axonignore(repo_path)
+    files = walk_repo(repo_path, ignore_patterns, doc_config=doc_config)
     result.files = len(files)
     report("Walking files", 1.0)
 
@@ -155,6 +163,20 @@ def run_pipeline(
     result.coupled_pairs = process_coupling(graph, repo_path)
     report("Analyzing git history", 1.0)
 
+    # Optional LLM-based doc relation extraction (requires --doc-relations).
+    if doc_config and doc_config.enabled and doc_config.doc_relations and doc_config.completion_model:
+        report("Extracting doc relations", 0.0)
+        try:
+            from axon.core.ingestion.doc_relations import process_doc_relations
+            process_doc_relations(graph, doc_config.completion_model)
+        except Exception:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Doc relation extraction failed — skipping",
+                exc_info=True,
+            )
+        report("Extracting doc relations", 1.0)
+
     # Compute result counts before the optional embedding step so a
     # fastembed failure never leaves symbols/relationships at zero.
     result.symbols = sum(1 for n in graph.iter_nodes() if n.label in _SYMBOL_LABELS)
@@ -168,7 +190,8 @@ def run_pipeline(
         if embeddings:
             try:
                 report("Generating embeddings", 0.0)
-                node_embeddings = embed_graph(graph)
+                doc_embed_model = doc_config.embed_model if (doc_config and doc_config.enabled) else None
+                node_embeddings = embed_graph(graph, doc_embed_model=doc_embed_model)
                 storage.store_embeddings(node_embeddings)
                 result.embeddings = len(node_embeddings)
                 report("Generating embeddings", 1.0)
@@ -188,6 +211,7 @@ def reindex_files(
     file_entries: list[FileEntry],
     repo_path: Path,
     storage: StorageBackend,
+    doc_config: DocConfig | None = None,
 ) -> KnowledgeGraph:
     """Re-index specific files through phases 2-7 (file-local phases).
 

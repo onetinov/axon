@@ -432,6 +432,145 @@ def handle_detect_changes(storage: StorageBackend, diff: str) -> str:
     lines.append("Next: Use impact() on affected symbols to see downstream effects.")
     return "\n".join(lines)
 
+def handle_doc_search(storage: StorageBackend, query: str, limit: int = 20) -> str:
+    """Hybrid search scoped to DOCUMENT and SECTION nodes.
+
+    Results include ``file_path:start_line-end_line`` for precise navigation.
+
+    Args:
+        storage: The storage backend to search against.
+        query: Text search query.
+        limit: Maximum number of results (default 20).
+
+    Returns:
+        Formatted list of matching sections with location and prose snippet.
+    """
+    query_embedding: list[float] | None = None
+    try:
+        from axon.core.embeddings.embedder import _get_fastembed_model
+
+        model = _get_fastembed_model(_EMBED_MODEL_NAME)
+        query_embedding = list(next(iter(model.embed([query]))))
+    except Exception:
+        logger.debug("Doc search embedding failed, falling back to FTS only", exc_info=True)
+
+    all_results = hybrid_search(query, storage, query_embedding=query_embedding, limit=limit * 2)
+
+    # Filter to doc labels only.
+    doc_labels = {"document", "section"}
+    results = [r for r in all_results if r.label in doc_labels][:limit]
+
+    if not results:
+        return f"No documentation results found for '{query}'."
+
+    lines = [f"Documentation search results for '{query}' ({len(results)} results):", ""]
+    for i, r in enumerate(results, 1):
+        location = r.file_path
+        node = storage.get_node(r.node_id)
+        if node and node.start_line and node.end_line:
+            location = f"{r.file_path}:{node.start_line}-{node.end_line}"
+        label_display = r.label.title() if r.label else "Unknown"
+        lines.append(f"{i}. [{label_display}] {r.node_name}")
+        lines.append(f"   {location}")
+        if r.snippet:
+            snippet = r.snippet[:300].replace("\n", " ").strip()
+            lines.append(f"   {snippet}")
+        lines.append("")
+
+    lines.append("Next: Use axon_doc_context() on a section name for the full picture.")
+    return "\n".join(lines)
+
+
+def handle_doc_context(storage: StorageBackend, section: str) -> str:
+    """360-degree view of a documentation section.
+
+    Looks up the section by name, then retrieves its parent document,
+    sibling and child sections (via CONTAINS edges), and any REFERENCES,
+    DISCUSSES, BLOCKS, or SUPERSEDES relationships.
+
+    Args:
+        storage: The storage backend.
+        section: The section heading to look up.
+
+    Returns:
+        Formatted context view of the section.
+    """
+    results = _resolve_symbol(storage, section)
+    if not results:
+        return f"Section '{section}' not found."
+
+    # Prefer a SECTION match over a DOCUMENT match.
+    node = None
+    for r in results:
+        candidate = storage.get_node(r.node_id)
+        if candidate and candidate.label and candidate.label.value in ("section", "document"):
+            node = candidate
+            break
+
+    if node is None:
+        return f"Section '{section}' not found."
+
+    label_display = node.label.value.title() if node.label else "Unknown"
+    lines = [f"Doc {label_display}: {node.name}"]
+    lines.append(f"File: {node.file_path}:{node.start_line}-{node.end_line}")
+
+    if node.content:
+        excerpt = node.content[:400].replace("\n", " ").strip()
+        lines.append(f"Content: {excerpt}")
+
+    # CONTAINS: children of this node.
+    try:
+        rows = storage.execute_raw(
+            f"MATCH (s)-[:Contains]->(c) WHERE s.id = '{_escape_cypher(node.id)}' "
+            f"RETURN c.name, c.file_path, c.start_line, c.end_line LIMIT 20"
+        )
+        if rows:
+            lines.append(f"\nContains ({len(rows)} sub-sections):")
+            for row in rows:
+                child_loc = f"{row[1]}:{row[2]}-{row[3]}" if row[2] else str(row[1])
+                lines.append(f"  -> {row[0]}  {child_loc}")
+    except Exception:
+        pass
+
+    # REFERENCES edges.
+    _append_rel_edges(storage, node.id, "References", "references", lines)
+
+    # DISCUSSES edges.
+    _append_rel_edges(storage, node.id, "Discusses", "discusses", lines)
+
+    # BLOCKS edges.
+    _append_rel_edges(storage, node.id, "Blocks", "blocks", lines)
+
+    # SUPERSEDES edges.
+    _append_rel_edges(storage, node.id, "Supersedes", "supersedes", lines)
+
+    lines.append("")
+    lines.append("Next: Use axon_doc_search() to find related sections.")
+    return "\n".join(lines)
+
+
+def _append_rel_edges(
+    storage: StorageBackend,
+    node_id: str,
+    label: str,
+    rel_name: str,
+    lines: list[str],
+) -> None:
+    """Query and append outgoing edges of *rel_name* to *lines*."""
+    try:
+        rows = storage.execute_raw(
+            f"MATCH (s)-[:{rel_name.title()}]->(t) WHERE s.id = '{_escape_cypher(node_id)}' "
+            f"RETURN t.name, t.file_path, t.start_line LIMIT 10"
+        )
+        if rows:
+            lines.append(f"\n{label} ({len(rows)}):")
+            for row in rows:
+                loc = f"{row[1]}:{row[2]}" if row[2] else str(row[1])
+                lines.append(f"  -> {row[0]}  {loc}")
+    except Exception:
+        pass
+
+
 _WRITE_KEYWORDS = re.compile(
     r"\b(DELETE|DROP|CREATE|SET|REMOVE|MERGE|DETACH|INSTALL|LOAD|COPY|CALL)\b",
     re.IGNORECASE,

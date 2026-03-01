@@ -60,6 +60,10 @@ def generate_text(
         return _text_for_community(node, graph)
     if label == NodeLabel.PROCESS:
         return _text_for_process(node, graph)
+    if label == NodeLabel.DOCUMENT:
+        return _text_for_document(node, graph)
+    if label == NodeLabel.SECTION:
+        return _text_for_section(node, graph)
 
     # Fallback for any unexpected label — still produce something useful.
     return _header(node)
@@ -203,3 +207,33 @@ def _class_method_names(class_name: str, graph: KnowledgeGraph) -> list[str]:
     """Return sorted names of METHOD nodes whose ``class_name`` matches."""
     methods = graph.get_nodes_by_label(NodeLabel.METHOD)
     return sorted(m.name for m in methods if m.class_name == class_name)
+
+
+def _text_for_document(node: GraphNode, graph: KnowledgeGraph) -> str:
+    """Build text for DOCUMENT nodes (markdown files)."""
+    lines: list[str] = [_header(node)]
+
+    section_names = _target_names(node.id, RelType.CONTAINS, graph)
+    if section_names:
+        lines.append(f"sections: {', '.join(section_names)}")
+
+    return "\n".join(lines)
+
+
+def _text_for_section(node: GraphNode, graph: KnowledgeGraph) -> str:
+    """Build text for SECTION nodes (markdown headings)."""
+    lines: list[str] = [_header(node)]
+
+    if node.content:
+        # Include up to 400 chars of prose for semantic embedding richness.
+        lines.append(node.content[:400])
+
+    ref_names = _target_names(node.id, RelType.REFERENCES, graph)
+    if ref_names:
+        lines.append(f"references: {', '.join(ref_names)}")
+
+    discusses_names = _target_names(node.id, RelType.DISCUSSES, graph)
+    if discusses_names:
+        lines.append(f"discusses: {', '.join(discusses_names)}")
+
+    return "\n".join(lines)

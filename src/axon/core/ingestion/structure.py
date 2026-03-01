@@ -59,11 +59,13 @@ def process_structure(files: list[FileEntry], graph: KnowledgeGraph) -> None:
             )
 
     for file_info in files:
-        file_id = generate_id(NodeLabel.FILE, file_info.path)
+        # Markdown files get DOCUMENT nodes; all other files get FILE nodes.
+        node_label = NodeLabel.DOCUMENT if file_info.language == "markdown" else NodeLabel.FILE
+        file_id = generate_id(node_label, file_info.path)
         graph.add_node(
             GraphNode(
                 id=file_id,
-                label=NodeLabel.FILE,
+                label=node_label,
                 name=PurePosixPath(file_info.path).name,
                 file_path=file_info.path,
                 content=file_info.content,
@@ -90,7 +92,7 @@ def process_structure(files: list[FileEntry], graph: KnowledgeGraph) -> None:
             )
         )
 
-    # Folder -> File (immediate parent folder contains file)
+    # Folder -> File/Document (immediate parent folder contains file)
     for file_info in files:
         pure = PurePosixPath(file_info.path)
         parent_str = str(pure.parent)
@@ -98,7 +100,8 @@ def process_structure(files: list[FileEntry], graph: KnowledgeGraph) -> None:
             # Root-level file — no containing folder.
             continue
         parent_id = generate_id(NodeLabel.FOLDER, parent_str)
-        file_id = generate_id(NodeLabel.FILE, file_info.path)
+        node_label = NodeLabel.DOCUMENT if file_info.language == "markdown" else NodeLabel.FILE
+        file_id = generate_id(node_label, file_info.path)
         rel_id = f"contains:{parent_id}->{file_id}"
         graph.add_relationship(
             GraphRelationship(

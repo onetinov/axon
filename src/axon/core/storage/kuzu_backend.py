@@ -946,6 +946,18 @@ class KuzuBackend:
         except Exception:
             logger.debug("REL TABLE GROUP creation skipped", exc_info=True)
 
+        # Ensure any new node tables (added in later versions) are also covered
+        # by the rel table group.  ALTER TABLE … ADD FROM … TO … is a no-op if
+        # the pair already exists, so we attempt all pairs unconditionally.
+        for src in _NODE_TABLE_NAMES:
+            for dst in _NODE_TABLE_NAMES:
+                try:
+                    self._conn.execute(
+                        f"ALTER TABLE CodeRelation ADD FROM {src} TO {dst}"
+                    )
+                except Exception:
+                    pass  # pair already exists
+
         self._create_fts_indexes()
 
     def _create_fts_indexes(self) -> None:

@@ -114,20 +114,34 @@ def should_ignore(
 
     return False
 
+def _load_ignore_file(path: Path) -> list[str]:
+    """Read an ignore file and return its non-blank, non-comment lines."""
+    if not path.is_file():
+        return []
+    lines: list[str] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line and not line.startswith("#"):
+            lines.append(line)
+    return lines
+
+
 def load_gitignore(repo_path: Path) -> list[str]:
     """Read ``.gitignore`` from *repo_path* and return a list of patterns.
 
     Blank lines and comments (lines starting with ``#``) are stripped.
     Returns an empty list when the file does not exist.
     """
-    gitignore = repo_path / ".gitignore"
-    if not gitignore.is_file():
-        return []
+    return _load_ignore_file(repo_path / ".gitignore")
 
-    lines: list[str] = []
-    text = gitignore.read_text(encoding="utf-8")
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if line and not line.startswith("#"):
-            lines.append(line)
-    return lines
+
+def load_axonignore(repo_path: Path) -> list[str]:
+    """Read ``.axonignore`` from *repo_path* and return a list of patterns.
+
+    Follows the same gitignore syntax as ``.gitignore``.  Useful for
+    excluding generated files, large asset trees, or versioned release notes
+    that would pollute the knowledge graph without adding useful signal.
+
+    Returns an empty list when the file does not exist.
+    """
+    return _load_ignore_file(repo_path / ".axonignore")

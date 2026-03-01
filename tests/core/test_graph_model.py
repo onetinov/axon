@@ -32,6 +32,8 @@ class TestNodeLabel:
         "ENUM",
         "COMMUNITY",
         "PROCESS",
+        "DOCUMENT",
+        "SECTION",
     ]
 
     @pytest.mark.parametrize("name", EXPECTED)
@@ -66,6 +68,10 @@ class TestRelType:
         "USES_TYPE",
         "EXPORTS",
         "COUPLED_WITH",
+        "DISCUSSES",
+        "REFERENCES",
+        "SUPERSEDES",
+        "BLOCKS",
     ]
 
     @pytest.mark.parametrize("name", EXPECTED)

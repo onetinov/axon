@@ -135,6 +135,8 @@ class TestEmbeddableLabels:
             NodeLabel.INTERFACE,
             NodeLabel.TYPE_ALIAS,
             NodeLabel.ENUM,
+            NodeLabel.DOCUMENT,
+            NodeLabel.SECTION,
         }
         assert EMBEDDABLE_LABELS == expected
 

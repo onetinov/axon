@@ -24,6 +24,8 @@ class NodeLabel(Enum):
     ENUM = "enum"
     COMMUNITY = "community"
     PROCESS = "process"
+    DOCUMENT = "document"   # one per .md file (analogous to FILE)
+    SECTION = "section"     # one per heading-delimited section (analogous to FUNCTION)
 
 class RelType(Enum):
     """Relationship types connecting graph nodes."""
@@ -39,6 +41,10 @@ class RelType(Enum):
     USES_TYPE = "uses_type"
     EXPORTS = "exports"
     COUPLED_WITH = "coupled_with"
+    DISCUSSES = "discusses"     # SECTION discusses a concept / other SECTION
+    REFERENCES = "references"   # SECTION has explicit markdown link to another SECTION/DOCUMENT
+    SUPERSEDES = "supersedes"   # DOCUMENT supersedes an older DOCUMENT
+    BLOCKS = "blocks"           # one SECTION/DOCUMENT blocks another
 
 def generate_id(label: NodeLabel, file_path: str, symbol_name: str = "") -> str:
     """Produce a deterministic node ID.

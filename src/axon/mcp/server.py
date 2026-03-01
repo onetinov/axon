@@ -32,6 +32,8 @@ from axon.mcp.tools import (
     handle_cypher,
     handle_dead_code,
     handle_detect_changes,
+    handle_doc_context,
+    handle_doc_search,
     handle_impact,
     handle_list_repos,
     handle_query,
@@ -186,6 +188,47 @@ TOOLS: list[Tool] = [
             "required": ["query"],
         },
     ),
+    Tool(
+        name="axon_doc_search",
+        description=(
+            "Search markdown documentation using hybrid (keyword + vector) search. "
+            "Results include file_path:start_line-end_line for precise navigation. "
+            "Only available when the index was built with --include-docs."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query text.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results (default 20).",
+                    "default": 20,
+                },
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
+        name="axon_doc_context",
+        description=(
+            "Get a 360-degree view of a documentation section: parent document, "
+            "child sections, REFERENCES, DISCUSSES, BLOCKS, and SUPERSEDES edges. "
+            "Only available when the index was built with --include-docs."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "section": {
+                    "type": "string",
+                    "description": "Name of the documentation section to look up.",
+                },
+            },
+            "required": ["section"],
+        },
+    ),
 ]
 
 @server.list_tools()
@@ -209,6 +252,10 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
         return handle_detect_changes(storage, arguments.get("diff", ""))
     elif name == "axon_cypher":
         return handle_cypher(storage, arguments.get("query", ""))
+    elif name == "axon_doc_search":
+        return handle_doc_search(storage, arguments.get("query", ""), limit=arguments.get("limit", 20))
+    elif name == "axon_doc_context":
+        return handle_doc_context(storage, arguments.get("section", ""))
     else:
         return f"Unknown tool: {name}"
 

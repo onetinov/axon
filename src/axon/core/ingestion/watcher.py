@@ -18,6 +18,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from axon.config.doc_config import DocConfig
 from axon.config.ignore import load_gitignore, should_ignore
 from axon.config.languages import is_supported
 from axon.core.graph.graph import KnowledgeGraph
@@ -55,11 +56,28 @@ def _get_head_sha(repo_path: Path) -> str | None:
     return None
 
 
+def _load_doc_config(repo_path: Path) -> DocConfig | None:
+    """Load DocConfig from meta.json if present and docs are enabled."""
+    meta_path = repo_path / ".axon" / "meta.json"
+    if not meta_path.exists():
+        return None
+    try:
+        import json
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        dc_data = data.get("doc_config")
+        if dc_data:
+            return DocConfig.from_dict(dc_data)
+    except Exception:
+        pass
+    return None
+
+
 def _reindex_files(
     changed_paths: list[Path],
     repo_path: Path,
     storage: StorageBackend,
     gitignore_patterns: list[str] | None = None,
+    doc_config: DocConfig | None = None,
 ) -> tuple[int, set[str]]:
     """Re-index changed files through file-local phases.
 
@@ -67,6 +85,7 @@ def _reindex_files(
     """
     from axon.core.ingestion.pipeline import reindex_files
 
+    doc_extensions: dict[str, str] = {".md": "markdown"} if (doc_config and doc_config.enabled) else {}
     entries: list[FileEntry] = []
     reindexed_paths: set[str] = set()
 
@@ -88,16 +107,20 @@ def _reindex_files(
         if should_ignore(relative, gitignore_patterns):
             continue
 
-        if not is_supported(abs_path):
+        # Accept .md files when docs are enabled; otherwise require core support.
+        if abs_path.suffix == ".md" and doc_extensions:
+            entry = read_file(repo_path, abs_path, extra_extensions=doc_extensions)
+        elif not is_supported(abs_path):
             continue
+        else:
+            entry = read_file(repo_path, abs_path)
 
-        entry = read_file(repo_path, abs_path)
         if entry is not None:
             entries.append(entry)
             reindexed_paths.add(relative)
 
     if entries:
-        reindex_files(entries, repo_path, storage)
+        reindex_files(entries, repo_path, storage, doc_config=doc_config)
 
     return len(entries), reindexed_paths
 
@@ -208,6 +231,7 @@ async def watch_repo(
         return await asyncio.to_thread(fn, *args)
 
     gitignore = load_gitignore(repo_path)
+    doc_config = _load_doc_config(repo_path)
     dirty_files: set[str] = set()
     last_change_time: float = 0.0
     first_dirty_time: float = 0.0
@@ -232,7 +256,7 @@ async def watch_repo(
 
         if changed_paths:
             count, reindexed = await _run_sync(
-                _reindex_files, changed_paths, repo_path, storage, gitignore,
+                _reindex_files, changed_paths, repo_path, storage, gitignore, doc_config,
             )
             if reindexed:
                 dirty_files |= reindexed
