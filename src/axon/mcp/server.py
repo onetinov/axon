@@ -214,8 +214,8 @@ TOOLS: list[Tool] = [
     Tool(
         name="axon_doc_context",
         description=(
-            "Get a 360-degree view of a documentation section: parent document, "
-            "child sections, REFERENCES, DISCUSSES, BLOCKS, and SUPERSEDES edges. "
+            "Get the context of a documentation section: parent document, "
+            "child sections, and REFERENCES edges from explicit markdown links. "
             "Only available when the index was built with --include-docs."
         ),
         inputSchema={

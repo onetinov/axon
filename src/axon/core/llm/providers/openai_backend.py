@@ -31,16 +31,6 @@ def embed(texts: list[str], model_name: str, dimensions: int | None = None) -> l
     return [item.embedding for item in response.data]
 
 
-def complete(prompt: str, model_name: str) -> str:
-    """Single-turn chat completion via OpenAI."""
-    client = _cached_client()
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response.choices[0].message.content or ""
-
-
 def is_available() -> bool:
     """Return True if OPENAI_API_KEY is set."""
     return bool(os.environ.get("OPENAI_API_KEY"))

@@ -24,17 +24,6 @@ def embed(texts: list[str], model_name: str) -> list[list[float]]:
     return data["embeddings"]
 
 
-def complete(prompt: str, model_name: str) -> str:
-    """Single-turn completion via Ollama /api/generate (non-streaming)."""
-    host = _ollama_host()
-    url = f"{host}/api/generate"
-    payload = json.dumps({"model": model_name, "prompt": prompt, "stream": False}).encode()
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        data = json.loads(resp.read())
-    return data.get("response", "")
-
-
 def list_models() -> list[str]:
     """Return available model names from the local Ollama instance."""
     host = _ollama_host()

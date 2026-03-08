@@ -163,20 +163,6 @@ def run_pipeline(
     result.coupled_pairs = process_coupling(graph, repo_path)
     report("Analyzing git history", 1.0)
 
-    # Optional LLM-based doc relation extraction (requires --doc-relations).
-    if doc_config and doc_config.enabled and doc_config.doc_relations and doc_config.completion_model:
-        report("Extracting doc relations", 0.0)
-        try:
-            from axon.core.ingestion.doc_relations import process_doc_relations
-            process_doc_relations(graph, doc_config.completion_model)
-        except Exception:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
-                "Doc relation extraction failed — skipping",
-                exc_info=True,
-            )
-        report("Extracting doc relations", 1.0)
-
     # Compute result counts before the optional embedding step so a
     # fastembed failure never leaves symbols/relationships at zero.
     result.symbols = sum(1 for n in graph.iter_nodes() if n.label in _SYMBOL_LABELS)

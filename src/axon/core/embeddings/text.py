@@ -232,8 +232,4 @@ def _text_for_section(node: GraphNode, graph: KnowledgeGraph) -> str:
     if ref_names:
         lines.append(f"references: {', '.join(ref_names)}")
 
-    discusses_names = _target_names(node.id, RelType.DISCUSSES, graph)
-    if discusses_names:
-        lines.append(f"discusses: {', '.join(discusses_names)}")
-
     return "\n".join(lines)

@@ -254,6 +254,8 @@ The `--watch` flag enables live re-indexing — the graph updates as you edit co
 | `axon_detect_changes` | Map a `git diff` to affected symbols and execution flows |
 | `axon_list_repos` | All indexed repositories with stats |
 | `axon_cypher` | Read-only Cypher queries against the knowledge graph |
+| `axon_doc_search` | Hybrid search over markdown docs — results include `file:start_line-end_line` for precise navigation. Requires `--include-docs`. |
+| `axon_doc_context` | 360-degree view of a doc section — parent document, child sections, REFERENCES, DISCUSSES, BLOCKS, SUPERSEDES edges. Requires `--include-docs`. |
 
 Every tool response includes a **next-step hint** guiding the agent through a natural investigation workflow:
 
@@ -334,6 +336,12 @@ uv run axon --help
 axon analyze [PATH]          Index a repository (default: current directory)
     --full                   Force full rebuild (skip incremental)
     --no-embeddings          Skip vector embedding generation (faster indexing)
+    --include-docs           Also index markdown files as Document/Section nodes
+    --doc-relations          Extract semantic relationships between sections (requires --include-docs and a completion model)
+    --doc-model MODEL        Completion model for doc relation extraction (default: ollama/qwen2.5)
+    --embed-model MODEL      Embedding model — prefix selects backend: fastembed/, ollama/, openai/, anthropic/
+
+axon models                  List available embedding and completion model backends with availability status
 
 axon status                  Show index status for current repo
 axon list                    List all indexed repositories (auto-populated on analyze)
@@ -416,12 +424,14 @@ axon cypher "MATCH (a:File)-[r:CodeRelation]->(b:File) WHERE r.rel_type = 'coupl
 | `Enum` | Enumeration |
 | `Community` | Auto-detected functional cluster |
 | `Process` | Detected execution flow |
+| `Document` | Markdown file (enabled via `--include-docs`) |
+| `Section` | Heading-delimited section within a document, with `start_line`/`end_line` |
 
 ### Relationships
 
 | Type | Description | Key Properties |
 |------|-------------|----------------|
-| `CONTAINS` | Folder -> File/Symbol hierarchy | -- |
+| `CONTAINS` | Folder -> File/Symbol hierarchy; Document -> Section hierarchy | -- |
 | `DEFINES` | File -> Symbol it defines | -- |
 | `CALLS` | Symbol -> Symbol it calls | `confidence` (0.0-1.0) |
 | `IMPORTS` | File -> File it imports from | `symbols` (names list) |
@@ -432,6 +442,10 @@ axon cypher "MATCH (a:File)-[r:CodeRelation]->(b:File) WHERE r.rel_type = 'coupl
 | `MEMBER_OF` | Symbol -> Community it belongs to | -- |
 | `STEP_IN_PROCESS` | Symbol -> Process it participates in | `step_number` |
 | `COUPLED_WITH` | File -> File that co-changes with it | `strength`, `co_changes` |
+| `REFERENCES` | Section -> Document it links to (from `[text](other.md)` links) | -- |
+| `DISCUSSES` | Section -> Section it semantically discusses (LLM-extracted) | -- |
+| `BLOCKS` | Section -> Section it blocks or depends on (LLM-extracted) | -- |
+| `SUPERSEDES` | Section -> Section it replaces (LLM-extracted) | -- |
 
 ### Node ID Format
 

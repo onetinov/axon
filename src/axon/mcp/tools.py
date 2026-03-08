@@ -485,8 +485,8 @@ def handle_doc_context(storage: StorageBackend, section: str) -> str:
     """360-degree view of a documentation section.
 
     Looks up the section by name, then retrieves its parent document,
-    sibling and child sections (via CONTAINS edges), and any REFERENCES,
-    DISCUSSES, BLOCKS, or SUPERSEDES relationships.
+    child sections (via CONTAINS edges), and REFERENCES edges from
+    explicit markdown links.
 
     Args:
         storage: The storage backend.
@@ -532,17 +532,8 @@ def handle_doc_context(storage: StorageBackend, section: str) -> str:
     except Exception:
         pass
 
-    # REFERENCES edges.
+    # REFERENCES edges (from explicit markdown links).
     _append_rel_edges(storage, node.id, "References", "references", lines)
-
-    # DISCUSSES edges.
-    _append_rel_edges(storage, node.id, "Discusses", "discusses", lines)
-
-    # BLOCKS edges.
-    _append_rel_edges(storage, node.id, "Blocks", "blocks", lines)
-
-    # SUPERSEDES edges.
-    _append_rel_edges(storage, node.id, "Supersedes", "supersedes", lines)
 
     lines.append("")
     lines.append("Next: Use axon_doc_search() to find related sections.")

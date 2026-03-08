@@ -16,16 +16,12 @@ class DocConfig:
 
     enabled: bool = False
     embed_model: str = "ollama/nomic-embed-text"    # prose-optimised default
-    completion_model: str | None = None              # None = skip LLM relations
-    doc_relations: bool = False                      # whether to run LLM phase
 
     def to_dict(self) -> dict:
         """Serialise to a plain dict for JSON storage."""
         return {
             "enabled": self.enabled,
             "embed_model": self.embed_model,
-            "completion_model": self.completion_model,
-            "doc_relations": self.doc_relations,
         }
 
     @classmethod
@@ -34,6 +30,4 @@ class DocConfig:
         return cls(
             enabled=data.get("enabled", False),
             embed_model=data.get("embed_model", "ollama/nomic-embed-text"),
-            completion_model=data.get("completion_model"),
-            doc_relations=data.get("doc_relations", False),
         )

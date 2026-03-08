@@ -131,9 +131,7 @@ def analyze(
     full: bool = typer.Option(False, "--full", help="Perform a full re-index."),
     no_embeddings: bool = typer.Option(False, "--no-embeddings", help="Skip vector embedding generation."),
     include_docs: bool = typer.Option(False, "--include-docs", help="Index markdown documents alongside code."),
-    doc_relations: bool = typer.Option(False, "--doc-relations", help="Run LLM-based doc relationship extraction (requires --include-docs)."),
-    doc_model: str = typer.Option("gemini/gemini-2.5-flash-lite", "--doc-model", help="Completion model for doc relation extraction. Options: gemini/gemini-2.5-flash-lite (default, ~$1/12k sections), openai/gpt-4.1-nano, anthropic/claude-haiku-4-5, ollama/qwen2.5 (free/local, quality varies)."),
-    embed_model: Optional[str] = typer.Option(None, "--embed-model", help="Override doc embedding model (e.g. openai/text-embedding-3-small). Default: ollama/nomic-embed-text."),
+    embed_model: Optional[str] = typer.Option(None, "--embed-model", help="Doc embedding model (e.g. openai/text-embedding-3-small). Default: ollama/nomic-embed-text."),
 ) -> None:
     """Index a repository into a knowledge graph."""
     from axon.config.doc_config import DocConfig
@@ -150,15 +148,11 @@ def analyze(
         doc_config = DocConfig(
             enabled=True,
             embed_model=embed_model or "ollama/nomic-embed-text",
-            completion_model=doc_model if doc_relations else None,
-            doc_relations=doc_relations,
         )
 
     console.print(f"[bold]Indexing[/bold] {repo_path}")
     if doc_config:
         console.print(f"  Docs:           enabled (embed: {doc_config.embed_model})")
-        if doc_config.doc_relations:
-            console.print(f"  Doc relations:  enabled (model: {doc_config.completion_model})")
 
     axon_dir = repo_path / ".axon"
     axon_dir.mkdir(parents=True, exist_ok=True)
@@ -409,19 +403,13 @@ def diff(
 
 @app.command()
 def models() -> None:
-    """List available embedding and completion models based on detected API keys."""
+    """List available embedding models based on detected API keys."""
     from axon.core.llm.providers.base import list_available_models
 
     available = list_available_models()
 
     console.print("[bold]Embedding models:[/bold]")
     for m in available.get("embedding", []):
-        tick = "[green]✓[/green]" if m["available"] else "[red]✗[/red]"
-        console.print(f"  {tick} {m['model']:<45} [{m['note']}]")
-
-    console.print()
-    console.print("[bold]Completion models (doc-relations):[/bold]")
-    for m in available.get("completion", []):
         tick = "[green]✓[/green]" if m["available"] else "[red]✗[/red]"
         console.print(f"  {tick} {m['model']:<45} [{m['note']}]")
 

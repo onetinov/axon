@@ -35,7 +35,7 @@ def _get_fastembed_model(model_name: str) -> "TextEmbedding":
 _get_model = _get_fastembed_model
 
 
-_PROVIDER_PREFIXES = frozenset({"fastembed", "ollama", "openai", "anthropic"})
+_PROVIDER_PREFIXES = frozenset({"fastembed", "ollama", "openai"})
 
 
 def _embed_texts(texts: list[str], model: str, batch_size: int = 64) -> list[list[float]]:
