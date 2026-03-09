@@ -41,7 +41,7 @@ class StorageBackend(Protocol):
     search, vector search, and incremental re-indexing support.
     """
 
-    def initialize(self, path: Path) -> None:
+    def initialize(self, path: Path, read_only: bool = False) -> None:
         """Open or create the backing store at *path*."""
         ...
 
@@ -179,4 +179,12 @@ class StorageBackend(Protocol):
 
     def rebuild_fts_indexes(self) -> None:
         """Drop and recreate all FTS indexes after bulk data changes."""
+        ...
+
+    def get_embedding(self, node_id: str) -> list[float] | None:
+        """Return the stored embedding vector for *node_id*, or ``None``."""
+        ...
+
+    def get_file_context(self, file_path: str) -> dict:
+        """Return a dict with symbols, imports_out, imports_in, line_count, language."""
         ...

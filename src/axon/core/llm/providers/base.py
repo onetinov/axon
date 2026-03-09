@@ -54,11 +54,17 @@ def list_available_models() -> dict[str, list[dict]]:
     embedding_models: list[dict] = []
 
     # --- fastembed (always available, local) ---
-    embedding_models.append({
-        "model": "fastembed/BAAI/bge-small-en-v1.5",
-        "available": True,
-        "note": "local, 384 dims, no API key needed",
-    })
+    for fe_model, dims, note in [
+        ("nomic-ai/nomic-embed-text-v1.5", 768, "local default — 768 dims, 8192 token window, code + prose"),
+        ("BAAI/bge-small-en-v1.5", 384, "local, 384 dims, lightweight"),
+        ("BAAI/bge-large-en-v1.5", 1024, "local, 1024 dims, higher quality"),
+        ("jinaai/jina-embeddings-v2-base-en", 768, "local, 768 dims, 8192 token window"),
+    ]:
+        embedding_models.append({
+            "model": f"fastembed/{fe_model}",
+            "available": True,
+            "note": note,
+        })
 
     # --- Ollama ---
     ollama_models: list[str] = []

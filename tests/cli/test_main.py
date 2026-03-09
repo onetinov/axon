@@ -336,14 +336,11 @@ class TestMcp:
 
     def test_mcp_calls_server_main(self) -> None:
         """MCP command should call asyncio.run(mcp_main())."""
-        with patch("axon.cli.main.asyncio", create=True) as mock_asyncio:
-            with patch("axon.mcp.server.main") as mock_mcp_main:
-                # We need to mock at the import level inside the function
-                import asyncio as real_asyncio
+        import asyncio as real_asyncio
 
-                with patch.object(real_asyncio, "run") as mock_run:
-                    result = runner.invoke(app, ["mcp"])
-                    mock_run.assert_called_once()
+        with patch.object(real_asyncio, "run", side_effect=lambda coro: coro.close()) as mock_run:
+            result = runner.invoke(app, ["mcp"])
+            mock_run.assert_called_once()
 
 
 class TestServe:
@@ -359,7 +356,7 @@ class TestServe:
         """serve without --watch should behave like axon mcp."""
         import asyncio as real_asyncio
 
-        with patch.object(real_asyncio, "run") as mock_run:
+        with patch.object(real_asyncio, "run", side_effect=lambda coro: coro.close()) as mock_run:
             result = runner.invoke(app, ["serve"])
             mock_run.assert_called_once()
 

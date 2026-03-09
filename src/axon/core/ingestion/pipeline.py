@@ -75,6 +75,7 @@ def run_pipeline(
     progress_callback: Callable[[str, float], None] | None = None,
     embeddings: bool = True,
     doc_config: DocConfig | None = None,
+    embed_model: str | None = None,
 ) -> tuple[KnowledgeGraph, PipelineResult]:
     """Run phases 1-11 of the ingestion pipeline.
 
@@ -102,6 +103,10 @@ def run_pipeline(
         Optional :class:`DocConfig` enabling markdown doc indexing.  When
         ``None`` or ``doc_config.enabled is False``, no ``.md`` files are
         processed (zero impact on existing code paths).
+    embed_model:
+        Embedding model for all nodes (code + docs).  When ``None``,
+        :func:`~axon.core.embeddings.embedder.default_embed_model` auto-selects
+        based on available API keys.
 
     Returns
     -------
@@ -176,8 +181,7 @@ def run_pipeline(
         if embeddings:
             try:
                 report("Generating embeddings", 0.0)
-                doc_embed_model = doc_config.embed_model if (doc_config and doc_config.enabled) else None
-                node_embeddings = embed_graph(graph, doc_embed_model=doc_embed_model)
+                node_embeddings = embed_graph(graph, model_name=embed_model)
                 storage.store_embeddings(node_embeddings)
                 result.embeddings = len(node_embeddings)
                 report("Generating embeddings", 1.0)

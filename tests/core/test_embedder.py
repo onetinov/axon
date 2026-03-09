@@ -342,16 +342,18 @@ class TestEmbedGraphModelConfig:
 
     @patch("fastembed.TextEmbedding")
     def test_default_model_name(self, mock_te_cls: MagicMock, sample_graph: KnowledgeGraph) -> None:
-        """Default model is BAAI/bge-small-en-v1.5."""
+        """Default model is nomic-ai/nomic-embed-text-v1.5 when no API key is set."""
         mock_model = MagicMock()
         mock_model.embed.return_value = iter(
             [np.array([0.1, 0.2, 0.3]), np.array([0.4, 0.5, 0.6])]
         )
         mock_te_cls.return_value = mock_model
 
+        import os
+        os.environ.pop("OPENAI_API_KEY", None)
         embed_graph(sample_graph)
 
-        mock_te_cls.assert_called_once_with(model_name="BAAI/bge-small-en-v1.5")
+        mock_te_cls.assert_called_once_with(model_name="nomic-ai/nomic-embed-text-v1.5")
 
     @patch("fastembed.TextEmbedding")
     def test_custom_model_name(self, mock_te_cls: MagicMock, sample_graph: KnowledgeGraph) -> None:

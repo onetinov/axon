@@ -16,6 +16,7 @@ import asyncio
 import logging
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from axon.config.doc_config import DocConfig
@@ -70,6 +71,19 @@ def _load_doc_config(repo_path: Path) -> DocConfig | None:
     except Exception:
         pass
     return None
+
+
+def _load_embed_model(repo_path: Path) -> str | None:
+    """Load the embed_model stored in meta.json, or None to use the default."""
+    meta_path = repo_path / ".axon" / "meta.json"
+    if not meta_path.exists():
+        return None
+    try:
+        import json
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        return data.get("embed_model") or None
+    except Exception:
+        return None
 
 
 def _reindex_files(
@@ -147,6 +161,7 @@ def _run_incremental_global_phases(
     repo_path: Path,
     dirty_files: set[str],
     run_coupling: bool = False,
+    embed_model: str | None = None,
 ) -> None:
     """Run global phases incrementally using graph hydrated from storage."""
     from axon.core.ingestion.community import process_communities
@@ -197,7 +212,7 @@ def _run_incremental_global_phases(
     if dirty_node_ids:
         logger.info("Re-embedding %d nodes...", len(dirty_node_ids))
         try:
-            embeddings = embed_nodes(graph, dirty_node_ids)
+            embeddings = embed_nodes(graph, dirty_node_ids, model_name=embed_model)
             if embeddings:
                 storage.upsert_embeddings(embeddings)
         except Exception:
@@ -210,10 +225,11 @@ def _run_incremental_global_phases(
 
 async def watch_repo(
     repo_path: Path,
-    storage: StorageBackend,
+    db_path: Path,
     *,
     stop_event: asyncio.Event | None = None,
     lock: asyncio.Lock | None = None,
+    on_batch_complete: Callable | None = None,
 ) -> None:
     """Main watch loop — monitor files and re-index on changes.
 
@@ -221,17 +237,73 @@ async def watch_repo(
     (communities, processes, dead code, embeddings) run after a quiet
     period of QUIET_PERIOD seconds with no new changes. Coupling runs
     only when new git commits are detected.
+
+    A transient read-write KuzuBackend is opened only during each write
+    batch and closed immediately after, so CLI tools in other processes
+    can open the DB read-only between batches.
     """
     import watchfiles
 
-    async def _run_sync(fn, *args):
+    from axon.core.storage.kuzu_backend import KuzuBackend
+
+    def _reindex_with_write_storage(
+        changed_paths: list[Path],
+        gitignore: list[str] | None,
+        doc_config: DocConfig | None,
+    ) -> tuple[int, set[str]]:
+        ws = KuzuBackend()
+        ws.initialize(db_path)
+        try:
+            return _reindex_files(changed_paths, repo_path, ws, gitignore, doc_config)
+        finally:
+            ws.close()
+
+    def _global_phases_with_write_storage(
+        snapshot: set[str],
+        run_coupling: bool,
+        embed_model: str | None,
+    ) -> None:
+        ws = KuzuBackend()
+        ws.initialize(db_path)
+        try:
+            _run_incremental_global_phases(ws, repo_path, snapshot, run_coupling, embed_model)
+        finally:
+            ws.close()
+
+    async def _run_tier1(
+        changed_paths: list[Path],
+        gitignore: list[str] | None,
+        doc_config: DocConfig | None,
+    ) -> tuple[int, set[str]]:
         if lock is not None:
             async with lock:
-                return await asyncio.to_thread(fn, *args)
-        return await asyncio.to_thread(fn, *args)
+                return await asyncio.to_thread(
+                    _reindex_with_write_storage, changed_paths, gitignore, doc_config
+                )
+        return await asyncio.to_thread(
+            _reindex_with_write_storage, changed_paths, gitignore, doc_config
+        )
+
+    async def _run_tier2(
+        snapshot: set[str],
+        run_coupling: bool,
+        embed_model: str | None,
+    ) -> None:
+        if lock is not None:
+            async with lock:
+                await asyncio.to_thread(
+                    _global_phases_with_write_storage, snapshot, run_coupling, embed_model
+                )
+        else:
+            await asyncio.to_thread(
+                _global_phases_with_write_storage, snapshot, run_coupling, embed_model
+            )
+        if on_batch_complete:
+            await on_batch_complete()
 
     gitignore = load_gitignore(repo_path)
     doc_config = _load_doc_config(repo_path)
+    embed_model = _load_embed_model(repo_path)
     dirty_files: set[str] = set()
     last_change_time: float = 0.0
     first_dirty_time: float = 0.0
@@ -255,9 +327,7 @@ async def watch_repo(
                 changed_paths.append(Path(path_str))
 
         if changed_paths:
-            count, reindexed = await _run_sync(
-                _reindex_files, changed_paths, repo_path, storage, gitignore, doc_config,
-            )
+            count, reindexed = await _run_tier1(changed_paths, gitignore, doc_config)
             if reindexed:
                 dirty_files |= reindexed
                 last_change_time = time.monotonic()
@@ -286,10 +356,7 @@ async def watch_repo(
             try:
                 async with global_lock:
                     logger.info("Running incremental global phases...")
-                    await _run_sync(
-                        _run_incremental_global_phases,
-                        storage, repo_path, snapshot, run_coupling,
-                    )
+                    await _run_tier2(snapshot, run_coupling, embed_model)
             except Exception:
                 logger.exception("Global phases failed; re-queueing dirty files")
                 dirty_files |= snapshot

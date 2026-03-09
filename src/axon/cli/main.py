@@ -32,7 +32,15 @@ def _load_storage(repo_path: Path | None = None) -> "KuzuBackend":  # noqa: F821
         raise typer.Exit(code=1)
 
     storage = KuzuBackend()
-    storage.initialize(db_path, read_only=True)
+    try:
+        storage.initialize(db_path, read_only=True)
+    except RuntimeError as exc:
+        if "lock" in str(exc).lower():
+            console.print(
+                "[red]Error:[/red] Database is locked by another process. Retry in a moment."
+            )
+            raise typer.Exit(code=1)
+        raise
     return storage
 
 
@@ -131,10 +139,23 @@ def analyze(
     full: bool = typer.Option(False, "--full", help="Perform a full re-index."),
     no_embeddings: bool = typer.Option(False, "--no-embeddings", help="Skip vector embedding generation."),
     include_docs: bool = typer.Option(False, "--include-docs", help="Index markdown documents alongside code."),
-    embed_model: Optional[str] = typer.Option(None, "--embed-model", help="Doc embedding model (e.g. openai/text-embedding-3-small). Default: ollama/nomic-embed-text."),
+    embed_model: Optional[str] = typer.Option(
+        None,
+        "--embed-model",
+        help=(
+            "Embedding model for all nodes (code + docs). "
+            "Defaults to openai/text-embedding-3-small when OPENAI_API_KEY is set, "
+            "otherwise nomic-ai/nomic-embed-text-v1.5 (local, 768-dim). "
+            "Examples: openai/text-embedding-3-large, ollama/nomic-embed-text, "
+            "fastembed/BAAI/bge-small-en-v1.5"
+        ),
+    ),
 ) -> None:
     """Index a repository into a knowledge graph."""
+    import json as _json
+
     from axon.config.doc_config import DocConfig
+    from axon.core.embeddings.embedder import check_model_available, default_embed_model
     from axon.core.ingestion.pipeline import PipelineResult, run_pipeline
     from axon.core.storage.kuzu_backend import KuzuBackend
 
@@ -143,23 +164,64 @@ def analyze(
         console.print(f"[red]Error:[/red] {repo_path} is not a directory.")
         raise typer.Exit(code=1)
 
+    # Determine the embed model to use, with explicit precedence:
+    #   1. --embed-model flag (explicit user override)
+    #   2. Previously stored model in meta.json (incremental consistency)
+    #   3. Auto-detect based on available API keys
+    stored_model: str | None = None
+    meta_path = repo_path / ".axon" / "meta.json"
+    if meta_path.exists() and not full:
+        try:
+            stored_model = _json.loads(meta_path.read_text(encoding="utf-8")).get("embed_model")
+        except Exception:
+            pass
+
+    if embed_model:
+        resolved_embed_model = embed_model
+        if stored_model and stored_model != embed_model:
+            console.print(
+                f"[yellow]Warning:[/yellow] Changing embed model from "
+                f"[bold]{stored_model}[/bold] → [bold]{embed_model}[/bold]. "
+                f"Run with [bold]--full[/bold] to re-embed all nodes with the new model."
+            )
+    elif stored_model:
+        resolved_embed_model = stored_model
+    else:
+        resolved_embed_model = default_embed_model()
+
+    if not no_embeddings:
+        ok, reason = check_model_available(resolved_embed_model)
+        if not ok:
+            console.print(f"[red]Error:[/red] Embed model [bold]{resolved_embed_model}[/bold] is not available: {reason}")
+            console.print("Use [bold]--embed-model[/bold] to specify a different model, or [bold]--no-embeddings[/bold] to skip.")
+            raise typer.Exit(code=1)
+
     doc_config: DocConfig | None = None
     if include_docs:
-        doc_config = DocConfig(
-            enabled=True,
-            embed_model=embed_model or "ollama/nomic-embed-text",
-        )
+        doc_config = DocConfig(enabled=True)
 
     console.print(f"[bold]Indexing[/bold] {repo_path}")
+    if not no_embeddings:
+        console.print(f"  Embed model:    {resolved_embed_model}")
     if doc_config:
-        console.print(f"  Docs:           enabled (embed: {doc_config.embed_model})")
+        console.print(f"  Docs:           enabled")
 
     axon_dir = repo_path / ".axon"
     axon_dir.mkdir(parents=True, exist_ok=True)
     db_path = axon_dir / "kuzu"
 
     storage = KuzuBackend()
-    storage.initialize(db_path)
+    try:
+        storage.initialize(db_path)
+    except RuntimeError as exc:
+        if "lock" in str(exc).lower():
+            console.print(
+                "[red]Error:[/red] Database is locked by another process "
+                "(axon serve is likely running).\n"
+                "Stop it first:  [bold]pkill -f 'axon serve'[/bold]"
+            )
+            raise SystemExit(1)
+        raise
 
     result: PipelineResult | None = None
     with Progress(
@@ -180,9 +242,12 @@ def analyze(
             progress_callback=on_progress,
             embeddings=not no_embeddings,
             doc_config=doc_config,
+            embed_model=resolved_embed_model if not no_embeddings else None,
         )
 
     meta = _build_meta(result, repo_path)
+    if not no_embeddings:
+        meta["embed_model"] = resolved_embed_model
     if doc_config:
         meta["doc_config"] = doc_config.to_dict()
     meta_path = axon_dir / "meta.json"
@@ -376,14 +441,14 @@ def watch() -> None:
         console.print("[bold]Running initial index...[/bold]")
         run_pipeline(repo_path, storage, full=True)
 
+    storage.close()
+
     console.print(f"[bold]Watching[/bold] {repo_path} for changes (Ctrl+C to stop)")
 
     try:
-        asyncio.run(watch_repo(repo_path, storage))
+        asyncio.run(watch_repo(repo_path, db_path))
     except KeyboardInterrupt:
         console.print("\n[bold]Watch stopped.[/bold]")
-    finally:
-        storage.close()
 
 @app.command()
 def diff(
@@ -437,8 +502,9 @@ def serve(
         asyncio.run(mcp_main())
         return
 
+    from axon.core.embeddings.embedder import check_model_available
     from axon.core.ingestion.pipeline import run_pipeline
-    from axon.core.ingestion.watcher import watch_repo
+    from axon.core.ingestion.watcher import _load_embed_model, watch_repo
     from axon.core.storage.kuzu_backend import KuzuBackend
 
     repo_path = Path.cwd().resolve()
@@ -446,8 +512,21 @@ def serve(
     axon_dir.mkdir(parents=True, exist_ok=True)
     db_path = axon_dir / "kuzu"
 
-    storage = KuzuBackend()
-    storage.initialize(db_path)
+    # Validate stored embed model is still accessible before starting the watcher.
+    # A mismatch would silently corrupt the index with wrong-dimension embeddings
+    # on every file save.
+    stored_embed_model = _load_embed_model(repo_path)
+    if stored_embed_model:
+        ok, reason = check_model_available(stored_embed_model)
+        if not ok:
+            print(
+                f"ERROR: The index was built with embed model '{stored_embed_model}' "
+                f"but it is no longer available: {reason}\n"
+                f"Re-index with an available model (axon analyze --full --embed-model <model>) "
+                f"before using --watch.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=1)
 
     if not (axon_dir / "meta.json").exists():
         print("Running initial index...", file=sys.stderr)
@@ -456,7 +535,12 @@ def serve(
             if pct == 0.0:
                 print(f"  {phase}...", file=sys.stderr, flush=True)
 
-        _, result = run_pipeline(repo_path, storage, full=True, progress_callback=_stderr_progress)
+        write_storage = KuzuBackend()
+        write_storage.initialize(db_path)
+        try:
+            _, result = run_pipeline(repo_path, write_storage, full=True, progress_callback=_stderr_progress)
+        finally:
+            write_storage.close()
 
         meta = _build_meta(result, repo_path)
         meta_path = axon_dir / "meta.json"
@@ -469,8 +553,13 @@ def serve(
 
         print("  Index complete.", file=sys.stderr, flush=True)
 
+    # Open a permanent read-only connection for MCP tool queries.
+    # The watcher manages its own transient read-write connections per batch.
+    query_storage = KuzuBackend()
+    query_storage.initialize(db_path, read_only=True)
+
     lock = asyncio.Lock()
-    set_storage(storage)
+    set_storage(query_storage)
     set_lock(lock)
 
     async def _run() -> None:
@@ -479,6 +568,21 @@ def serve(
 
         stop = asyncio.Event()
 
+        async def _refresh_query_storage() -> None:
+            """Reopen the read-only query connection after each watcher write batch."""
+            async with lock:
+                query_storage.close()
+                for attempt in range(5):
+                    try:
+                        query_storage.initialize(db_path, read_only=True)
+                        set_storage(query_storage)
+                        return
+                    except Exception:
+                        if attempt == 4:
+                            logger.warning("Failed to reopen query_storage after write batch; MCP queries may be stale", exc_info=True)
+                            return
+                        await asyncio.sleep(0.2 * (attempt + 1))
+
         async with stdio_server() as (read, write):
             async def _mcp_then_stop():
                 await mcp_server.run(read, write, mcp_server.create_initialization_options())
@@ -486,7 +590,8 @@ def serve(
 
             await asyncio.gather(
                 _mcp_then_stop(),
-                watch_repo(repo_path, storage, stop_event=stop, lock=lock),
+                watch_repo(repo_path, db_path, stop_event=stop, lock=lock,
+                           on_batch_complete=_refresh_query_storage),
             )
 
     try:
@@ -494,4 +599,4 @@ def serve(
     except KeyboardInterrupt:
         pass
     finally:
-        storage.close()
+        query_storage.close()

@@ -29,14 +29,18 @@ from axon.mcp.resources import get_dead_code_list, get_overview, get_schema
 from axon.mcp.tools import (
     MAX_TRAVERSE_DEPTH,
     handle_context,
+    handle_cycles,
     handle_cypher,
     handle_dead_code,
     handle_detect_changes,
     handle_doc_context,
     handle_doc_search,
+    handle_doc_staleness,
+    handle_file_context,
     handle_impact,
     handle_list_repos,
     handle_query,
+    handle_similar,
 )
 
 logger = logging.getLogger(__name__)
@@ -229,6 +233,78 @@ TOOLS: list[Tool] = [
             "required": ["section"],
         },
     ),
+    Tool(
+        name="axon_file_context",
+        description=(
+            "File-level 360° view: all symbols defined in the file, files it imports, "
+            "and files that import it. Partial path matching is supported."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path (partial match OK, e.g. 'src/api/main.py').",
+                },
+            },
+            "required": ["path"],
+        },
+    ),
+    Tool(
+        name="axon_similar",
+        description=(
+            "Find symbols semantically similar to a given symbol using "
+            "embedding cosine similarity. Requires the index to have embeddings."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Name of the symbol to find similar symbols for.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results (default 10).",
+                    "default": 10,
+                },
+            },
+            "required": ["symbol"],
+        },
+    ),
+    Tool(
+        name="axon_cycles",
+        description=(
+            "Detect circular import dependencies in the codebase. "
+            "Uses DFS on IMPORTS edges already in the graph."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Optional subdirectory prefix to limit scope.",
+                },
+            },
+        },
+    ),
+    Tool(
+        name="axon_doc_staleness",
+        description=(
+            "Check a markdown file for backtick code references that no longer exist "
+            "in the graph. Only available when the index was built with --include-docs."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Markdown file path to check (partial match OK).",
+                },
+            },
+            "required": ["path"],
+        },
+    ),
 ]
 
 @server.list_tools()
@@ -256,6 +332,14 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
         return handle_doc_search(storage, arguments.get("query", ""), limit=arguments.get("limit", 20))
     elif name == "axon_doc_context":
         return handle_doc_context(storage, arguments.get("section", ""))
+    elif name == "axon_file_context":
+        return handle_file_context(storage, arguments.get("path", ""))
+    elif name == "axon_similar":
+        return handle_similar(storage, arguments.get("symbol", ""), limit=arguments.get("limit", 10))
+    elif name == "axon_cycles":
+        return handle_cycles(storage, path=arguments.get("path"))
+    elif name == "axon_doc_staleness":
+        return handle_doc_staleness(storage, arguments.get("path", ""))
     else:
         return f"Unknown tool: {name}"
 

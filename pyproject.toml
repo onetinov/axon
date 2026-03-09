@@ -43,7 +43,9 @@ Issues = "https://github.com/harshkedia177/axon/issues"
 
 [project.optional-dependencies]
 neo4j = ["neo4j>=5.0.0"]
-openai = ["openai>=1.0.0"]
+openai = [
+    "openai>=1.0.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
@@ -71,4 +73,3 @@ select = ["E", "F", "I", "N", "W"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"

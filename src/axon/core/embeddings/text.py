@@ -75,6 +75,11 @@ def _text_for_callable(node: GraphNode, graph: KnowledgeGraph) -> str:
     if node.signature:
         lines.append(f"signature: {node.signature}")
 
+    # Include the actual source body — docstrings + logic are the richest
+    # semantic signal and dramatically improve embedding quality.
+    if node.content:
+        lines.append(node.content[:800])
+
     callee_names = _target_names(node.id, RelType.CALLS, graph)
     if callee_names:
         lines.append(f"calls: {', '.join(callee_names)}")
@@ -96,6 +101,10 @@ def _text_for_class(
 ) -> str:
     """Build text for CLASS nodes."""
     lines: list[str] = [_header(node)]
+
+    # Class body / docstring gives the model semantic context.
+    if node.content:
+        lines.append(node.content[:600])
 
     if class_method_index is not None:
         method_names = class_method_index.get(node.name, [])
@@ -144,6 +153,9 @@ def _text_for_type_definition(node: GraphNode, _graph: KnowledgeGraph) -> str:
 
     if node.signature:
         lines.append(f"signature: {node.signature}")
+
+    if node.content:
+        lines.append(node.content[:400])
 
     return "\n".join(lines)
 
@@ -225,8 +237,9 @@ def _text_for_section(node: GraphNode, graph: KnowledgeGraph) -> str:
     lines: list[str] = [_header(node)]
 
     if node.content:
-        # Include up to 400 chars of prose for semantic embedding richness.
-        lines.append(node.content[:400])
+        # 8192-token models can handle full section content — use 1500 chars
+        # to capture the complete prose without burning too much token budget.
+        lines.append(node.content[:1500])
 
     ref_names = _target_names(node.id, RelType.REFERENCES, graph)
     if ref_names:

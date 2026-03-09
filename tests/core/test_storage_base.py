@@ -168,6 +168,12 @@ class TestStorageBackend:
             def rebuild_fts_indexes(self):
                 pass
 
+            def get_embedding(self, node_id):
+                return None
+
+            def get_file_context(self, file_path):
+                return {}
+
         assert isinstance(_DummyBackend(), StorageBackend)
 
     def test_non_conforming_class_fails(self) -> None:

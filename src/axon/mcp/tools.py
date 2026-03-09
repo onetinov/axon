@@ -562,6 +562,286 @@ def _append_rel_edges(
         pass
 
 
+def handle_file_context(storage: StorageBackend, path: str) -> str:
+    """360° view of a file: defined symbols, outgoing imports, incoming imports.
+
+    Args:
+        storage: The storage backend.
+        path: File path (partial match OK).
+
+    Returns:
+        Formatted file context with symbol list and import graph.
+    """
+    ctx = storage.get_file_context(path)
+    if not ctx:
+        return f"File '{path}' not found in the index."
+
+    lang = ctx.get("language") or "unknown"
+    lines = [f"File: {ctx['file_path']}"]
+    if lang and lang != "unknown":
+        lines.append(f"Language: {lang}")
+    if ctx.get("line_count"):
+        lines.append(f"Lines: {ctx['line_count']}")
+
+    symbols = ctx.get("symbols", [])
+    if symbols:
+        symbols_sorted = sorted(symbols, key=lambda s: s.get("start_line", 0))
+        lines.append(f"\nDefined symbols ({len(symbols_sorted)}):")
+        for s in symbols_sorted:
+            label = s.get("label", "").title() or "Symbol"
+            loc = f":{s['start_line']}" if s.get("start_line") else ""
+            lines.append(f"  {s['name']} ({label}){loc}")
+    else:
+        lines.append("\nNo defined symbols found.")
+
+    imports_out = ctx.get("imports_out", [])
+    if imports_out:
+        lines.append(f"\nImports ({len(imports_out)} files):")
+        for imp in imports_out:
+            lines.append(f"  -> {imp['file_path']}")
+
+    imports_in = ctx.get("imports_in", [])
+    if imports_in:
+        lines.append(f"\nImported by ({len(imports_in)} files):")
+        for imp in imports_in:
+            lines.append(f"  <- {imp['file_path']}")
+
+    lines.append("")
+    lines.append("Next: Use axon_context <symbol> for a deep dive on a specific symbol.")
+    return "\n".join(lines)
+
+
+def handle_similar(storage: StorageBackend, symbol: str, limit: int = 10) -> str:
+    """Find symbols semantically similar to the given one via embedding cosine similarity.
+
+    Args:
+        storage: The storage backend.
+        symbol: The symbol name to find similar items for.
+        limit: Maximum number of similar symbols to return (default 10).
+
+    Returns:
+        Ranked list of similar symbols with similarity scores.
+    """
+    results = _resolve_symbol(storage, symbol)
+    if not results:
+        return f"Symbol '{symbol}' not found."
+
+    node = storage.get_node(results[0].node_id)
+    if not node:
+        return f"Symbol '{symbol}' not found."
+
+    vec = storage.get_embedding(node.id)
+    if vec is None:
+        return (
+            f"No embedding found for '{symbol}'. "
+            "Re-index with embeddings enabled to use semantic similarity."
+        )
+
+    similar = storage.vector_search(vec, limit=limit + 1)
+    similar = [r for r in similar if r.node_id != node.id][:limit]
+
+    if not similar:
+        return f"No similar symbols found for '{symbol}'."
+
+    label_display = node.label.value.title() if node.label else "Unknown"
+    lines = [f"Symbols similar to: {node.name} ({label_display})", f"File: {node.file_path}", ""]
+    for i, r in enumerate(similar, 1):
+        pct = f"{r.score * 100:.1f}%"
+        label = r.label.title() if r.label else "Unknown"
+        loc = f"{r.file_path}:{r.node_name}" if r.file_path else r.node_name
+        lines.append(f"{i}. [{pct}] {r.node_name} ({label}) — {r.file_path}")
+
+    lines.append("")
+    lines.append("Next: Use axon_context <symbol> to inspect any of these.")
+    return "\n".join(lines)
+
+
+def handle_cycles(storage: StorageBackend, path: str | None = None) -> str:
+    """Detect circular import dependencies via DFS on IMPORTS edges.
+
+    Args:
+        storage: The storage backend.
+        path: Optional subdirectory path prefix to limit the search scope.
+
+    Returns:
+        Formatted list of detected cycles, or a clean bill of health.
+    """
+    try:
+        rows = storage.execute_raw(
+            "MATCH (src:File)-[r:CodeRelation]->(tgt:File) "
+            "WHERE r.rel_type = 'imports' "
+            "RETURN src.id, src.file_path, tgt.id, tgt.file_path"
+        )
+    except Exception as exc:
+        return f"Failed to query import edges: {exc}"
+
+    if not rows:
+        return "No import edges found in the index."
+
+    # Build adjacency dict {file_path: set of file_path}
+    adj: dict[str, set[str]] = {}
+    id_to_fp: dict[str, str] = {}
+    for row in rows:
+        src_id, src_fp, tgt_id, tgt_fp = row[0] or "", row[1] or "", row[2] or "", row[3] or ""
+        if not src_fp or not tgt_fp:
+            continue
+        if path and not (src_fp.startswith(path) or tgt_fp.startswith(path)):
+            continue
+        id_to_fp[src_id] = src_fp
+        id_to_fp[tgt_id] = tgt_fp
+        adj.setdefault(src_fp, set()).add(tgt_fp)
+
+    # DFS cycle detection — collect all unique cycles (normalized)
+    cycles: list[list[str]] = []
+    seen_cycles: set[frozenset] = set()
+
+    def dfs(node: str, stack: list[str], visited: set[str]) -> None:
+        visited.add(node)
+        stack.append(node)
+        for neighbor in adj.get(node, set()):
+            if neighbor in stack:
+                # Found a cycle — extract the cycle portion
+                idx = stack.index(neighbor)
+                cycle = stack[idx:] + [neighbor]
+                key = frozenset(cycle[:-1])
+                if key not in seen_cycles:
+                    seen_cycles.add(key)
+                    cycles.append(cycle)
+            elif neighbor not in visited:
+                dfs(neighbor, stack, visited)
+        stack.pop()
+        visited.discard(node)
+
+    all_nodes = set(adj.keys())
+    global_visited: set[str] = set()
+    for node in sorted(all_nodes):
+        if node not in global_visited:
+            dfs(node, [], global_visited)
+
+    if not cycles:
+        scope = f" under '{path}'" if path else ""
+        return f"No circular imports detected{scope}."
+
+    lines = [f"Circular imports detected ({len(cycles)} cycle(s)):"]
+    for i, cycle in enumerate(cycles, 1):
+        length = len(cycle) - 1
+        lines.append(f"\nCycle {i} (length {length}):")
+        lines.append("  " + " -> ".join(cycle))
+
+    lines.append("")
+    lines.append("Tip: Refactor shared logic into a dedicated module to break cycles.")
+    return "\n".join(lines)
+
+
+_BACKTICK_RE = re.compile(r"`([^`\n]+)`")
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _extract_symbols(text: str) -> list[str]:
+    """Extract candidate symbol names from backtick spans in markdown text."""
+    symbols: list[str] = []
+    for m in _BACKTICK_RE.finditer(text):
+        raw = re.sub(r"\(.*\)$", "", m.group(1).strip())  # foo() -> foo
+        for part in raw.split("."):  # Foo.bar -> [Foo, bar]
+            part = part.strip()
+            if part and _IDENTIFIER_RE.match(part) and len(part) > 2:
+                symbols.append(part)
+    return list(dict.fromkeys(symbols))  # deduplicate, preserve order
+
+
+def handle_doc_staleness(storage: StorageBackend, path: str) -> str:
+    """Check markdown docs for code symbol references that no longer exist in the graph.
+
+    Args:
+        storage: The storage backend.
+        path: Markdown file path to check (partial match OK).
+
+    Returns:
+        Report of stale and valid symbol references found in the doc.
+    """
+    # Find SECTION (and DOCUMENT) nodes for this file
+    sections: list[tuple[str, str, int]] = []  # (node_name, content, start_line)
+    try:
+        rows = storage.execute_raw(
+            f"MATCH (n:Section) WHERE n.file_path CONTAINS '{_escape_cypher(path)}' "
+            f"RETURN n.name, n.content, n.start_line ORDER BY n.start_line"
+        )
+        for row in rows or []:
+            sections.append((row[0] or "", row[1] or "", row[2] or 0))
+    except Exception as exc:
+        logger.debug("handle_doc_staleness: section query failed: %s", exc, exc_info=True)
+
+    # Also try Document node itself for content
+    if not sections:
+        try:
+            rows = storage.execute_raw(
+                f"MATCH (n:Document) WHERE n.file_path CONTAINS '{_escape_cypher(path)}' "
+                f"RETURN n.name, n.content, n.start_line LIMIT 1"
+            )
+            for row in rows or []:
+                sections.append((row[0] or "", row[1] or "", row[2] or 0))
+        except Exception:
+            pass
+
+    if not sections:
+        return f"No indexed documentation found for '{path}'. Index with --include-docs first."
+
+    # Collect all symbols across sections, tracking origin
+    symbol_to_sections: dict[str, list[tuple[str, int]]] = {}
+    for sec_name, content, start_line in sections:
+        for sym in _extract_symbols(content):
+            symbol_to_sections.setdefault(sym, []).append((sec_name, start_line))
+
+    if not symbol_to_sections:
+        return f"No backtick code references found in '{path}'."
+
+    stale: list[tuple[str, list[tuple[str, int]]]] = []
+    ok: list[str] = []
+
+    for sym, origins in sorted(symbol_to_sections.items()):
+        found = False
+        if hasattr(storage, "exact_name_search"):
+            results = storage.exact_name_search(sym, limit=1)
+            found = bool(results)
+        if not found:
+            results = storage.fts_search(sym, limit=1)
+            found = bool(results) and (results[0].node_name == sym)
+        if found:
+            ok.append(sym)
+        else:
+            stale.append((sym, origins))
+
+    # Determine the doc file path from the first section
+    doc_file = ""
+    try:
+        rows = storage.execute_raw(
+            f"MATCH (n:Document) WHERE n.file_path CONTAINS '{_escape_cypher(path)}' "
+            f"RETURN n.file_path LIMIT 1"
+        )
+        if rows:
+            doc_file = rows[0][0] or path
+    except Exception:
+        doc_file = path
+
+    lines = [f"Staleness check: {doc_file or path}"]
+
+    if stale:
+        lines.append(f"\nSTALE references ({len(stale)} found):")
+        for sym, origins in stale:
+            for sec_name, lineno in origins[:2]:  # cap at 2 origins per symbol
+                loc = f"line {lineno}" if lineno else "?"
+                lines.append(f"  {sym} — not in graph (section: '{sec_name}', {loc})")
+    else:
+        lines.append("\nNo stale references found.")
+
+    if ok:
+        ok_preview = ", ".join(ok[:5])
+        suffix = f" (+{len(ok) - 5} others)" if len(ok) > 5 else ""
+        lines.append(f"\nOK: {ok_preview}{suffix}")
+
+    return "\n".join(lines)
+
+
 _WRITE_KEYWORDS = re.compile(
     r"\b(DELETE|DROP|CREATE|SET|REMOVE|MERGE|DETACH|INSTALL|LOAD|COPY|CALL)\b",
     re.IGNORECASE,

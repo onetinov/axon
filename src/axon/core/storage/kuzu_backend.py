@@ -566,10 +566,12 @@ class KuzuBackend:
         # Vector literals must be inlined — KuzuDB parameterized queries
         # cannot distinguish DOUBLE[] from LIST for array_cosine_similarity.
         vec_literal = "[" + ", ".join(str(v) for v in vector) + "]"
+        vec_dim = len(vector)
 
         try:
             result = self._conn.execute(
                 f"MATCH (e:Embedding) "
+                f"WHERE size(e.vec) = {vec_dim} "
                 f"RETURN e.node_id, "
                 f"array_cosine_similarity(e.vec, {vec_literal}) AS sim "
                 f"ORDER BY sim DESC LIMIT {limit}"
@@ -795,6 +797,143 @@ class KuzuBackend:
             self.add_relationships(list(graph.iter_relationships()))
 
         self.rebuild_fts_indexes()
+
+    def get_embedding(self, node_id: str) -> list[float] | None:
+        """Return the stored embedding vector for *node_id*, or ``None`` if absent."""
+        assert self._conn is not None
+        try:
+            result = self._conn.execute(
+                "MATCH (e:Embedding) WHERE e.node_id = $nid RETURN e.vec",
+                parameters={"nid": node_id},
+            )
+            if result.has_next():
+                vec = result.get_next()[0]
+                return list(vec) if vec is not None else None
+        except Exception:
+            logger.debug("get_embedding failed for %s", node_id, exc_info=True)
+        return None
+
+    def get_file_context(self, file_path: str) -> dict:
+        """Return a 360° view of a file: defined symbols, imports out/in, metadata.
+
+        Returns a dict with keys:
+          node_id, name, file_path, language, line_count,
+          symbols (list of dicts), imports_out (list of dicts), imports_in (list of dicts)
+        Returns an empty dict if the file is not found.
+        """
+        assert self._conn is not None
+        file_node: dict | None = None
+
+        for table in ("File", "Document"):
+            try:
+                result = self._conn.execute(
+                    f"MATCH (n:{table}) WHERE n.file_path CONTAINS $fp RETURN n.* LIMIT 1",
+                    parameters={"fp": file_path},
+                )
+                if result.has_next():
+                    row = result.get_next()
+                    node = self._row_to_node(row)
+                    if node:
+                        content = node.content or ""
+                        file_node = {
+                            "node_id": node.id,
+                            "name": node.name,
+                            "file_path": node.file_path,
+                            "language": node.language,
+                            "line_count": content.count("\n") + 1 if content else 0,
+                        }
+                        break
+            except Exception:
+                logger.debug("get_file_context: lookup failed for table %s", table, exc_info=True)
+
+        if file_node is None:
+            return {}
+
+        nid = file_node["node_id"]
+        fp = file_node["file_path"]
+
+        # Symbols defined in this file (DEFINES edges)
+        symbols: list[dict] = []
+        try:
+            result = self._conn.execute(
+                "MATCH (src:File)-[r:CodeRelation]->(tgt) "
+                "WHERE src.id = $nid AND r.rel_type = 'defines' "
+                "RETURN tgt.id, tgt.name, tgt.start_line, tgt.end_line",
+                parameters={"nid": nid},
+            )
+            while result.has_next():
+                row = result.get_next()
+                label = row[0].split(":", 1)[0] if row[0] else ""
+                symbols.append({
+                    "id": row[0] or "",
+                    "name": row[1] or "",
+                    "label": label,
+                    "start_line": row[2] or 0,
+                    "end_line": row[3] or 0,
+                })
+        except Exception:
+            logger.debug("get_file_context: defines query failed", exc_info=True)
+
+        # Fallback: direct match on file_path for non-DEFINES graphs
+        if not symbols:
+            try:
+                result = self._conn.execute(
+                    "MATCH (n) WHERE n.file_path = $fp AND n.start_line > 0 "
+                    "RETURN n.id, n.name, n.start_line, n.end_line",
+                    parameters={"fp": fp},
+                )
+                while result.has_next():
+                    row = result.get_next()
+                    node_id_r = row[0] or ""
+                    label = node_id_r.split(":", 1)[0]
+                    if label in ("file", "document", "folder"):
+                        continue
+                    symbols.append({
+                        "id": node_id_r,
+                        "name": row[1] or "",
+                        "label": label,
+                        "start_line": row[2] or 0,
+                        "end_line": row[3] or 0,
+                    })
+            except Exception:
+                logger.debug("get_file_context: fallback symbols query failed", exc_info=True)
+
+        # Files this file imports (IMPORTS outgoing)
+        imports_out: list[dict] = []
+        try:
+            result = self._conn.execute(
+                "MATCH (src:File)-[r:CodeRelation]->(tgt:File) "
+                "WHERE src.id = $nid AND r.rel_type = 'imports' "
+                "RETURN tgt.id, tgt.file_path",
+                parameters={"nid": nid},
+            )
+            while result.has_next():
+                row = result.get_next()
+                imports_out.append({"id": row[0] or "", "file_path": row[1] or ""})
+        except Exception:
+            logger.debug("get_file_context: imports_out query failed", exc_info=True)
+
+        # Files that import this file (IMPORTS incoming)
+        imports_in: list[dict] = []
+        try:
+            result = self._conn.execute(
+                "MATCH (src:File)-[r:CodeRelation]->(tgt:File) "
+                "WHERE tgt.id = $nid AND r.rel_type = 'imports' "
+                "RETURN src.id, src.file_path",
+                parameters={"nid": nid},
+            )
+            while result.has_next():
+                row = result.get_next()
+                imports_in.append({"id": row[0] or "", "file_path": row[1] or ""})
+        except Exception:
+            logger.debug("get_file_context: imports_in query failed", exc_info=True)
+
+        return {
+            **file_node,
+            "symbols": symbols,
+            "imports_out": imports_out,
+            "imports_in": imports_in,
+        }
 
     def rebuild_fts_indexes(self) -> None:
         """Drop and recreate all FTS indexes.
